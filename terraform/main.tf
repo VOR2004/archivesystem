@@ -1,7 +1,8 @@
 resource "yandex_storage_bucket" "archives" {
-  bucket    = var.bucket_name
-  folder_id = var.folder_id
-  max_size  = 10 * 1024 * 1024 * 1024
+  bucket        = var.bucket_name
+  folder_id     = var.folder_id
+  max_size      = 10 * 1024 * 1024 * 1024
+  force_destroy = true
 
   anonymous_access_flags {
     read        = false
