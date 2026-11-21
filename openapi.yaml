@@ -1,0 +1,233 @@
+openapi: 3.0.0
+info:
+  title: vvot11 Archive API
+  version: 1.0.0
+  description: |
+    Асинхронное архивирование файлов по URL.
+    Задание передаётся в очередь, а готовые архивы доступны через API Gateway.
+
+# Terraform renders these placeholders with templatefile before creating the gateway.
+# The gateway's service domain is assigned automatically; no servers URL is needed.
+paths:
+  /tasks:
+    post:
+      operationId: createTask
+      summary: Создать задание на архивирование
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ArchiveTask'
+            example:
+              name: document.pdf
+              url: https://example.com/document.pdf
+      x-yc-apigateway-validator:
+        validateRequestBody: true
+      x-yc-apigateway-integration:
+        type: cloud_ymq
+        action: SendMessage
+        queue_url: '${queue_url}'
+        folder_id: '${folder_id}'
+        service_account_id: '${gateway_service_account_id}'
+        payload_format_type: body
+      responses:
+        # The mapping is attached to the original integration status, not to 202.
+        '200':
+          description: Успешный ответ очереди преобразуется в 202 Accepted.
+          x-yc-status-mapping: 202
+        '202':
+          description: |
+            Задание принято в очередь. Тело ответа пустое.
+            Обработка выполняется асинхронно; этот статус не подтверждает создание архива.
+        '400':
+          description: |
+            Некорректный JSON или задание не соответствует схеме.
+            При ошибке проверки схемы шлюз возвращает JSON-массив с описаниями ошибок.
+          content:
+            application/json:
+              examples:
+                missingUrl:
+                  summary: Отсутствует обязательное поле url.
+                  value:
+                    - instancePath: /requestBody
+                      schemaPath: '#/properties/requestBody/required'
+                      keyword: required
+                      params:
+                        missingProperty: url
+                      message: "must have required property 'url'"
+        default:
+          description: Ошибка API Gateway или очереди заданий.
+
+  /archives:
+    get:
+      operationId: listArchives
+      summary: Получить список архивов
+      x-yc-apigateway-integration:
+        type: cloud_ydb
+        action: Scan
+        database: '${database_path}'
+        table_name: archives
+        service_account_id: '${gateway_service_account_id}'
+      responses:
+        '200':
+          description: Список архивов; при отсутствии записей — пустой массив.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ArchiveMetadata'
+        default:
+          description: Ошибка API Gateway или базы данных.
+
+  /archives/{key}:
+    get:
+      operationId: getArchive
+      summary: Получить информацию об архиве
+      parameters:
+        - $ref: '#/components/parameters/ArchiveKey'
+      x-yc-apigateway-integration:
+        type: cloud_ydb
+        action: GetItem
+        database: '${database_path}'
+        table_name: archives
+        key: '{"key": "{key}"}'
+        service_account_id: '${gateway_service_account_id}'
+      responses:
+        '200':
+          description: Информация об архиве.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ArchiveMetadata'
+        '404':
+          description: Запись об архиве не найдена.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+              example:
+                message: 'there is no item with key {"key": "00000000-0000-7000-8000-000000000000.zip"}'
+        default:
+          description: Ошибка API Gateway или базы данных.
+
+  /download/{key}:
+    get:
+      operationId: downloadArchive
+      summary: Скачать ZIP-архив
+      parameters:
+        - $ref: '#/components/parameters/ArchiveKey'
+      x-yc-apigateway-integration:
+        type: object_storage
+        bucket: '${bucket_name}'
+        object: '{key}'
+        service_account_id: '${gateway_service_account_id}'
+      responses:
+        '200':
+          description: ZIP-архив с исходным файлом.
+          content:
+            application/zip:
+              schema:
+                type: string
+                format: binary
+        '404':
+          description: |
+            Объект архива не найден в хранилище.
+            Шлюз передаёт XML-ответ Object Storage с кодом ошибки NoSuchKey.
+          content:
+            application/xml:
+              schema:
+                $ref: '#/components/schemas/StorageError'
+              example: |
+                <?xml version="1.0" encoding="UTF-8"?>
+                <Error>
+                  <Code>NoSuchKey</Code>
+                  <Message>The specified key does not exist.</Message>
+                  <Resource>/vvot11-example/00000000-0000-7000-8000-000000000000.zip</Resource>
+                  <RequestId>example-request-id</RequestId>
+                </Error>
+        default:
+          description: Ошибка API Gateway или хранилища файлов.
+
+components:
+  parameters:
+    ArchiveKey:
+      name: key
+      in: path
+      required: true
+      description: Ключ объекта в хранилище в формате <uuid_v7>.zip.
+      schema:
+        $ref: '#/components/schemas/ArchiveKey'
+
+  schemas:
+    ApiError:
+      type: object
+      required:
+        - message
+      properties:
+        message:
+          type: string
+          description: Описание ошибки API Gateway или интеграции с базой данных.
+
+    StorageError:
+      type: object
+      xml:
+        name: Error
+      required:
+        - Code
+        - Message
+      properties:
+        Code:
+          type: string
+          description: Код ошибки Object Storage; для отсутствующего объекта — NoSuchKey.
+        Message:
+          type: string
+          description: Описание ошибки Object Storage.
+        Resource:
+          type: string
+          description: Путь объекта, к которому выполнялось обращение.
+        RequestId:
+          type: string
+          description: Идентификатор запроса к Object Storage.
+
+    ArchiveTask:
+      type: object
+      required:
+        - name
+        - url
+      properties:
+        name:
+          type: string
+          minLength: 1
+          pattern: '\S'
+          description: Название исходного файла внутри ZIP-архива.
+          example: document.pdf
+        url:
+          type: string
+          format: uri
+          pattern: '^https?://[^/\s?#]+[^\s]*$'
+          description: HTTP- или HTTPS-ссылка для скачивания исходного файла.
+          example: https://example.com/document.pdf
+
+    ArchiveKey:
+      type: string
+      pattern: '^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.zip$'
+      example: 019aaa01-2345-7abc-8def-0123456789ab.zip
+
+    ArchiveMetadata:
+      type: object
+      required:
+        - name
+        - url
+        - key
+      properties:
+        name:
+          type: string
+          description: Название исходного файла.
+        url:
+          type: string
+          format: uri
+          description: URL исходного файла.
+        key:
+          $ref: '#/components/schemas/ArchiveKey'
