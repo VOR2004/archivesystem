@@ -1,9 +1,9 @@
 locals {
   java_source_directory = "${path.module}/../src/main/java"
-  gson_version = regex(
-    "(?m)^gsonVersion=([^\\r\\n]+)$",
+  gson_version = trimspace(regex(
+    "(?m)^gsonVersion=([^\\r\\n]+)",
     file("${path.module}/../gradle.properties")
-  )[0]
+  )[0])
 }
 
 # Package sources locally with Terraform; Cloud Functions compiles them using Maven.
